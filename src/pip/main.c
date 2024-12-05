@@ -11,6 +11,7 @@
 /* FreeRTOS */
 #include "FreeRTOS.h"
 #include "task.h"
+#include "semphr.h"
 
 /* Standard includes. */
 #include <stdio.h>
@@ -30,7 +31,6 @@
 #include "bitmap.h"
 
 /*-----------------------------------------------------------*/
-#define STR 2
 
 /* Dimensions the buffer for text messages. */
 #define mainMAX_MSG_LEN                     25
@@ -43,35 +43,19 @@
 #define mainFULL_SCALE                      ( 15 )
 #define ulSSI_FREQUENCY                     ( 3500000UL )
 
-#if STR==1
+/* Mutex para evitar la inversión de prioridad */
+SemaphoreHandle_t xMutex;
 
 /* Tasks periods. */
-#define TASK1_PERIOD 	4000
-#define TASK2_PERIOD 	6000
-#define TASK3_PERIOD 	8000
-#define TASK4_PERIOD 	13000
+#define TASK1_PERIOD 5000
+#define TASK2_PERIOD 8000
+#define TASK3_PERIOD 12000
 
 /* Tasks WCETs. */
-#define TASK1_WCET		1000
-#define TASK2_WCET		1000
-#define TASK3_WCET		1000
-#define TASK4_WCET		3000
+#define TASK1_WCET 1000
+#define TASK2_WCET 1000
+#define TASK3_WCET 2000
 
-#else
-
-#define TASK1_PERIOD 	5000
-#define TASK2_PERIOD 	8000
-#define TASK3_PERIOD 	12000
-#define TASK4_PERIOD 	15000
-#define TASK5_PERIOD 	16000
-
-#define TASK1_WCET		1000
-#define TASK2_WCET		1000
-#define TASK3_WCET		2000
-#define TASK4_WCET		1000
-#define TASK5_WCET		1000
-
-#endif
 /*-----------------------------------------------------------*/
 
 /*
@@ -92,7 +76,9 @@ static void vBusyWait( TickType_t ticks );
 /*
  * Periodic task.
  */
-static void prvTask( void* pvParameters );
+void prvTaskLowPriority(void *pvParameters);
+void prvTaskMidPriority(void *pvParameters);
+void prvTaskHighPriority(void *pvParameters);
 
 /*-----------------------------------------------------------*/
 
@@ -106,19 +92,15 @@ void ( *vOLEDClear )( void ) = NULL;
 /*-----------------------------------------------------------*/
 
 struct xTaskStruct {
-	TickType_t wcet;
-	TickType_t period;
+    TickType_t wcet;
+    TickType_t period;
 };
 
 typedef struct xTaskStruct xTask;
 
-xTask task1 = { TASK1_WCET, TASK1_PERIOD };
-xTask task2 = { TASK2_WCET, TASK2_PERIOD };
-xTask task3 = { TASK3_WCET, TASK3_PERIOD };
-xTask task4 = { TASK4_WCET, TASK4_PERIOD };
-#if STR == 2
-xTask task5 = { TASK5_WCET, TASK5_PERIOD };
-#endif
+xTask task1 = {TASK1_WCET, TASK1_PERIOD};
+xTask task2 = {TASK2_WCET, TASK2_PERIOD};
+xTask task3 = {TASK3_WCET, TASK3_PERIOD};
 
 /*************************************************************************
  * Main
@@ -146,18 +128,21 @@ int main( void )
     sprintf(cMessage, "Hello World!");
     vOLEDStringDraw( cMessage, 0, 0, mainFULL_SCALE );
 
+    /* Crear el mutex */
+    xMutex = xSemaphoreCreateMutex();
+    if (xMutex == NULL)
+    {
+        prvPrintString("Error: No se pudo crear el mutex.\n\r");
+        while (1);
+    }
+
     /* Print "Start!" to the UART. */
     prvPrintString("Start!\n\r");
 
     /* Creates the periodic tasks. */
-    xTaskCreate( prvTask, "T1", configMINIMAL_STACK_SIZE + 50, (void*) &task1, configMAX_PRIORITIES - 1, NULL );
-    xTaskCreate( prvTask, "T2", configMINIMAL_STACK_SIZE + 50, (void*) &task2, configMAX_PRIORITIES - 2, NULL );
-    xTaskCreate( prvTask, "T3", configMINIMAL_STACK_SIZE + 50, (void*) &task3, configMAX_PRIORITIES - 3, NULL );
-    xTaskCreate( prvTask, "T4", configMINIMAL_STACK_SIZE + 50, (void*) &task4, configMAX_PRIORITIES - 4, NULL );
-
-#if STR == 2
-    xTaskCreate( prvTask, "T5", configMINIMAL_STACK_SIZE + 50, (void*) &task5, configMAX_PRIORITIES - 5, NULL );
-#endif
+    xTaskCreate(prvTaskLowPriority, "T1", configMINIMAL_STACK_SIZE + 50, (void *)&task1, 1, NULL);   // Prioridad baja
+    xTaskCreate(prvTaskMidPriority, "T2", configMINIMAL_STACK_SIZE + 50, (void *)&task2, 2, NULL);  // Prioridad media
+    xTaskCreate(prvTaskHighPriority, "T3", configMINIMAL_STACK_SIZE + 50, (void *)&task3, 3, NULL); // Prioridad alta
 
     vTraceEnable( TRC_START );
 
@@ -213,28 +198,69 @@ static void vBusyWait( TickType_t ticks )
 }
 /*-----------------------------------------------------------*/
 
-void prvTask( void *pvParameters )
+void prvTaskLowPriority(void *pvParameters)
 {
-	char cMessage[ mainMAX_MSG_LEN ];
-	unsigned int uxReleaseCount = 0;
-	TickType_t pxPreviousWakeTime = 0;
-	xTask *task = (xTask*) pvParameters;
+    xTask *task = (xTask *)pvParameters;
 
-	for( ;; )
-	{
-        sprintf( cMessage, "%s - %u\n\r", pcTaskGetTaskName( NULL ), uxReleaseCount );
+    for (;;)
+    {
+        /* Toma el mutex */
+        if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+        {
+            prvPrintString("Low: Mutex tomado.\n\r");
 
-        prvPrintString( cMessage );
+            /* Simular trabajo */
+            vBusyWait(task->wcet);
 
-        vBusyWait( task->wcet );
+            /* Libera el mutex */
+            prvPrintString("Low: Liberando mutex.\n\r");
+            xSemaphoreGive(xMutex);
+        }
 
-		vTaskDelayUntil( &pxPreviousWakeTime, task->period );
-
-		uxReleaseCount += 1;
-	}
-
-	vTaskDelete( NULL );
+        vTaskDelay(task->period);
+    }
 }
+
+void prvTaskMidPriority(void *pvParameters)
+{
+    xTask *task = (xTask *)pvParameters;
+
+    for (;;)
+    {
+        prvPrintString("Mid: Ejecutándose.\n\r");
+
+        /* Simular trabajo */
+        vBusyWait(task->wcet);
+
+        vTaskDelay(task->period);
+    }
+}
+
+void prvTaskHighPriority(void *pvParameters)
+{
+    xTask *task = (xTask *)pvParameters;
+
+    for (;;)
+    {
+        prvPrintString("High: Intentando tomar el mutex.\n\r");
+
+        /* Intentar tomar el mutex */
+        if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE)
+        {
+            prvPrintString("High: Mutex tomado.\n\r");
+
+            /* Trabajo rápido */
+            vBusyWait(task->wcet);
+
+            /* Libera el mutex */
+            prvPrintString("High: Liberando mutex.\n\r");
+            xSemaphoreGive(xMutex);
+        }
+
+        vTaskDelay(task->period);
+    }
+}
+
 /*-----------------------------------------------------------*/
 
 void vAssertCalled( const char *pcFile, uint32_t ulLine )
